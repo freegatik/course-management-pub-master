@@ -27,16 +27,23 @@ jobs:
   sast:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      security-events: write
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Semgrep Security Scan
-        uses: returntocorp/semgrep-action@v1
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          config: p/default
-          args: --sarif --output=semgrep.sarif
+          python-version: '3.x'
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Semgrep Security Scan
+        run: semgrep --config p/default --sarif --output=semgrep.sarif
 
       - name: Upload SARIF file
         uses: github/codeql-action/upload-sarif@v4
