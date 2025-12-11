@@ -36,7 +36,7 @@ jobs:
         uses: returntocorp/semgrep-action@v1
         with:
           config: p/default
-          generateSarif: "1"
+          args: --sarif --output=semgrep.sarif
 
       - name: Upload SARIF file
         uses: github/codeql-action/upload-sarif@v4
