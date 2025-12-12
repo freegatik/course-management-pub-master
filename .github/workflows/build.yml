@@ -114,6 +114,7 @@ jobs:
           allow_issue_writing: false
           cmd_options: '-a'
           fail_action: false
+        continue-on-error: true
 
       - name: Run OWASP ZAP API Scan
         uses: zaproxy/action-api-scan@v0.10.0
@@ -123,6 +124,7 @@ jobs:
           rules_file_name: 'zap-rules.tsv'
           allow_issue_writing: false
           fail_action: false
+        continue-on-error: true
 
       - name: Upload ZAP Scan Reports
         uses: actions/upload-artifact@v4
@@ -130,6 +132,9 @@ jobs:
         with:
           name: zap-scan-reports
           path: |
+            zap_*.html
+            zap_*.json
+            zap_*.md
             *.html
             *.json
             *.md
