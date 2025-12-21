@@ -173,8 +173,71 @@ jobs:
             *.json
             *.md
 
+  fuzzing:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Download ffuf
+        run: |
+          FFUF_VERSION=$(curl -s https://api.github.com/repos/ffuf/ffuf/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+          curl -L https://github.com/ffuf/ffuf/releases/download/${FFUF_VERSION}/ffuf_${FFUF_VERSION#v}_linux_amd64.tar.gz -o ffuf.tar.gz
+          tar -xzf ffuf.tar.gz
+          chmod +x ffuf
+          sudo mv ffuf /usr/local/bin/
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: course-management-jar
+          path: target/
+
+      - name: Start application
+        run: |
+          nohup java -jar target/*.jar > app.log 2>&1 &
+          echo "Application started. Waiting 60 seconds..."
+          sleep 60
+
+      - name: Health check
+        run: |
+          curl -f http://localhost:8080/actuator/health || echo "Health check failed, but continuing..."
+
+      - name: Run fuzzing tests with ffuf
+        run: |
+          echo "Starting fuzzing tests with ffuf..."
+          mkdir -p fuzzing-results
+          
+          echo -e "admin\napi\nlogin\nlogout\nregister\ncourses\nstudents\nusers\ntest\ndebug\nconfig\nsettings\nhealth\nactuator\nindex\nhome\nabout\ncontact\n.env\nwp-admin" > fuzzing-wordlist.txt
+          
+          ffuf -w fuzzing-wordlist.txt -u http://localhost:8080/FUZZ -mc 200,301,302,403 -o fuzzing-results/ffuf-report.json -of json || true
+          ffuf -w fuzzing-wordlist.txt -u http://localhost:8080/api/FUZZ -mc 200,301,302,403 -o fuzzing-results/ffuf-api-report.json -of json || true
+          
+          echo "Fuzzing tests completed"
+
+      - name: Stop application
+        if: always()
+        run: |
+          pkill -f "java -jar target" || true
+          sleep 5
+
+      - name: Upload fuzzing reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzzing-reports
+          path: fuzzing-results/
+          retention-days: 7
+
   security-check:
-    needs: [sast, dependency-scan, dast]
+    needs: [sast, dependency-scan, dast, fuzzing]
     runs-on: ubuntu-latest
     if: always()
     steps:
