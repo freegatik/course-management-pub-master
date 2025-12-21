@@ -173,8 +173,76 @@ jobs:
             *.json
             *.md
 
+  fuzzing:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl gcc libcurl4-openssl-dev libssl-dev
+
+      - name: Install wfuzz
+        run: pip install --break-system-packages wfuzz
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: course-management-jar
+          path: target/
+
+      - name: Start application
+        run: |
+          nohup java -jar target/*.jar > app.log 2>&1 &
+          echo "Application started. Waiting 60 seconds..."
+          sleep 60
+
+      - name: Health check
+        run: |
+          curl -f http://localhost:8080/actuator/health || echo "Health check failed, but continuing..."
+
+      - name: Run fuzzing tests with wfuzz
+        run: |
+          echo "Starting fuzzing tests with wfuzz..."
+          mkdir -p fuzzing-results
+          
+          echo -e "admin\napi\nlogin\nlogout\nregister\ncourses\nstudents\nusers\ntest\ndebug\nconfig\nsettings\nhealth\nactuator\nindex\nhome\nabout\ncontact\n.env\nwp-admin" > fuzzing-wordlist.txt
+          
+          wfuzz -c -z file,fuzzing-wordlist.txt --hc 404 -f fuzzing-results/wfuzz-report.txt http://localhost:8080/FUZZ || true
+          wfuzz -c -z file,fuzzing-wordlist.txt --hc 404 -f fuzzing-results/wfuzz-api-report.txt http://localhost:8080/api/FUZZ || true
+          
+          echo "Fuzzing tests completed"
+
+      - name: Stop application
+        if: always()
+        run: |
+          pkill -f "java -jar target" || true
+          sleep 5
+
+      - name: Upload fuzzing reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzzing-reports
+          path: fuzzing-results/
+          retention-days: 7
+
   security-check:
-    needs: [sast, dependency-scan, dast]
+    needs: [sast, dependency-scan, dast, fuzzing]
     runs-on: ubuntu-latest
     if: always()
     steps:
