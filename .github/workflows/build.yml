@@ -186,18 +186,13 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install system dependencies
+      - name: Download ffuf
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl gcc libcurl4-openssl-dev libssl-dev
-
-      - name: Install wfuzz
-        run: pip install --break-system-packages wfuzz
+          FFUF_VERSION=$(curl -s https://api.github.com/repos/ffuf/ffuf/releases/latest | grep "tag_name" | cut -d : -f 2,3 | tr -d \" | tr -d , | xargs)
+          curl -L https://github.com/ffuf/ffuf/releases/download/${FFUF_VERSION}/ffuf_${FFUF_VERSION#v}_linux_amd64.tar.gz -o ffuf.tar.gz
+          tar -xzf ffuf.tar.gz
+          chmod +x ffuf
+          sudo mv ffuf /usr/local/bin/
 
       - name: Download build artifact
         uses: actions/download-artifact@v4
@@ -215,16 +210,13 @@ jobs:
         run: |
           curl -f http://localhost:8080/actuator/health || echo "Health check failed, but continuing..."
 
-      - name: Run fuzzing tests with wfuzz
+      - name: Run fuzzing tests with ffuf
         run: |
-          echo "Starting fuzzing tests with wfuzz..."
+          echo "Starting fuzzing tests with ffuf..."
           mkdir -p fuzzing-results
-          
           echo -e "admin\napi\nlogin\nlogout\nregister\ncourses\nstudents\nusers\ntest\ndebug\nconfig\nsettings\nhealth\nactuator\nindex\nhome\nabout\ncontact\n.env\nwp-admin" > fuzzing-wordlist.txt
-          
-          wfuzz -c -z file,fuzzing-wordlist.txt --hc 404 -f fuzzing-results/wfuzz-report.txt http://localhost:8080/FUZZ || true
-          wfuzz -c -z file,fuzzing-wordlist.txt --hc 404 -f fuzzing-results/wfuzz-api-report.txt http://localhost:8080/api/FUZZ || true
-          
+          ffuf -w fuzzing-wordlist.txt -u http://localhost:8080/FUZZ -mc 200,301,302,403 -o fuzzing-results/ffuf-report-root.json -of json || true
+          ffuf -w fuzzing-wordlist.txt -u http://localhost:8080/api/FUZZ -mc 200,301,302,403 -o fuzzing-results/ffuf-report-api.json -of json || true
           echo "Fuzzing tests completed"
 
       - name: Stop application
@@ -241,8 +233,135 @@ jobs:
           path: fuzzing-results/
           retention-days: 7
 
+  container-build:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: course-management-jar
+          path: target/
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: course-management:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Save image to tarball
+        run: |
+          docker save course-management:latest -o image.tar
+          echo "course-management:latest" > .docker-image-tag
+
+      - name: Upload Docker image
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: |
+            image.tar
+            .docker-image-tag
+          retention-days: 1
+
+  container-scan:
+    needs: container-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Docker image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: .
+
+      - name: Load Docker image
+        run: docker load -i image.tar
+
+      - name: Run Trivy vulnerability scanner (table format)
+        uses: aquasecurity/trivy-action@master
+        continue-on-error: true
+        with:
+          image-ref: course-management:latest
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Run Trivy vulnerability scanner (JSON report)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: course-management:latest
+          format: 'json'
+          output: 'trivy-report.json'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+      - name: Upload Trivy report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-report
+          path: trivy-report.json
+          retention-days: 7
+
+  container-publish:
+    needs: container-scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: course-management-jar
+          path: target/
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   security-check:
-    needs: [sast, dependency-scan, dast, fuzzing]
+    needs: [sast, dependency-scan, dast, fuzzing, secrets-scan, container-scan]
     runs-on: ubuntu-latest
     if: always()
     steps:
